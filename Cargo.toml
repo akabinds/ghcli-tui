@@ -14,7 +14,13 @@ path = "src/main.rs"
 bench = false
 
 [dependencies]
+anyhow = "1.0.69"
 clap = { version = "4.1.6", features = ["derive"] }
 crossterm = "0.26.0"
+dirs = "4.0.0"
+gh-config = "0.2.1"
+octocrab = "0.18.1"
+serde = { version = "1.0.152", features = ["derive"] }
+serde_yaml = "0.9.17"
 tokio = { version = "1.25.0", features = ["macros", "rt-multi-thread"] }
 tui = "0.19.0"
