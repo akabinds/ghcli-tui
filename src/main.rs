@@ -1,64 +1,95 @@
-#![allow(unused_imports, dead_code, unused_variables)]
+#![allow(dead_code, unused_variables, unused_mut)]
 
 mod cli;
-mod config;
 mod instance;
 mod ui;
 
 use anyhow::Result;
 use clap::Parser;
 use cli::Cli;
-use config::{read_user_config, GhConfig, UserConfig};
 use crossterm::{
     event::{DisableMouseCapture, EnableMouseCapture},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use gh_config::{Config as GhCliConfig, Host, Hosts, GITHUB_COM};
+use gh_config::{Config as GhCliConfig, Host as GhCliHostConfig, Hosts, GITHUB_COM};
 use instance::Instance;
 use octocrab::Octocrab;
-use std::sync::Arc;
+use std::{io, sync::Arc};
+use tokio::sync::Mutex as TokioMutex;
+use tui::{backend::CrosstermBackend, Terminal};
 
-/// Attempt to retrieve the user's GitHub authentication token from the respected `GH_TOKEN` and `GITHUB_TOKEN` environment variables.
+/// Attempt to retrieve the user's personal authentication token for the `github.com` host from the respected `GH_TOKEN` and `GITHUB_TOKEN` environment variables.
 /// This allows the user to circumvent the need to run `gh auth login`.
-fn retrieve_token_in_env() -> Option<&'static str> {
+fn retrieve_ghcom_pat_from_env() -> Option<&'static str> {
     option_env!("GH_TOKEN").xor(option_env!("GITHUB_TOKEN"))
 }
 
-/// Attempt to retrieve the GitHub CLI host config and general config. If it is the user's first time using the GitHub CLI when using this application,
-/// this configuration will not be present in `SYSTEM_CONFIG_DIR/gh`. If this function fails, it will not prevent the UI from being loaded.
-/// But, when the UI launches, the user will have to properly authenticate themselves.
-fn retrieve_ghcli_config() -> Result<(GhCliConfig, Host)> {
+/// Attempt to retrieve the GitHub CLI general and host config. These configuration files will be present, in either
+/// `$XDG_CONFIG_HOME/gh` or the directory specified by the `GH_CONFIG_DIR` environment variable, if the user has
+/// already run `gh auth login`.
+fn retrieve_ghcli_config() -> Result<(GhCliConfig, GhCliHostConfig)> {
     // TODO: add support for GitHub Enterprise Server hosts
 
-    let ghcli_config = GhCliConfig::load()?;
+    // Check if the user overrode the directory where GitHub CLI stores config files and load the config from that directory.
+    // Otherwise, just load from `$XDG_CONFIG_HOME/gh`.
+    if let Some(custom_gh_config_dir) = option_env!("GH_CONFIG_DIR") {
+        let ghcli_config = GhCliConfig::load_from(custom_gh_config_dir)?;
+        let ghcli_host_config = Hosts::load_from(custom_gh_config_dir)?
+            .get(GITHUB_COM)
+            .cloned()
+            .unwrap();
 
-    // it is ok to unwrap here because if we get to this point, the user has already authenticated themselves before
-    let ghcli_host_config = Hosts::load()?.get(GITHUB_COM).cloned().unwrap();
+        Ok((ghcli_config, ghcli_host_config))
+    } else {
+        let ghcli_config = GhCliConfig::load()?;
+        let ghcli_host_config = Hosts::load()?.get(GITHUB_COM).cloned().unwrap();
 
-    Ok((ghcli_config, ghcli_host_config))
+        Ok((ghcli_config, ghcli_host_config))
+    }
 }
 
-async fn start_ui(instance: &Arc<Instance>, auth_prompt_on_start: bool) -> Result<()> {
-    todo!();
+fn initialize_terminal() -> Result<()> {
+    enable_raw_mode()?;
+    let mut stdout = io::stdout();
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+
+    Ok(())
+}
+
+fn restore_terminal() -> Result<()> {
+    disable_raw_mode()?;
+    let mut stdout = io::stdout();
+    execute!(stdout, LeaveAlternateScreen, DisableMouseCapture)?;
+
+    Ok(())
+}
+
+async fn ui_loop(instance: Arc<TokioMutex<Instance>>) -> Result<()> {
+    initialize_terminal()?;
+
+    let mut backend = CrosstermBackend::new(io::stdout());
+    let mut terminal = Terminal::new(backend)?;
+    terminal.hide_cursor()?;
+
+    terminal.show_cursor()?;
+    restore_terminal()?;
+
+    Ok(())
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let instance = {
-        let mut gh_client_builder = Octocrab::builder();
+    let cli = Cli::parse();
 
-        if let Some(token) = retrieve_token_in_env() {
-            gh_client_builder = gh_client_builder.personal_token(token.into());
-        } else if let Ok((ghcli_config, ghcli_host_config)) = retrieve_ghcli_config() {
-            todo!();
-        }
+    if let Some(ghcom_auth_token) = retrieve_ghcom_pat_from_env() {
+        let ghapi_client_builder = Octocrab::builder().personal_token(ghcom_auth_token.into());
+        let ghapi_client = octocrab::initialise(ghapi_client_builder)?;
 
-        let user_config = serde_yaml::from_str(&config::read_user_config()?)?;
-        let gh_client = octocrab::initialise(gh_client_builder)?;
+        let instance = Arc::new(TokioMutex::new(Instance::with_pat(ghapi_client)));
 
-        Instance::new(user_config, gh_client)
-    };
+        ui_loop(instance).await?;
+    }
 
     Ok(())
 }
